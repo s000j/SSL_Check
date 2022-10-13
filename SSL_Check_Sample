@@ -1,0 +1,111 @@
+const request = require("request"),
+  assert = require("assert"),
+  Q = require("q"),
+  licenseKey = "e3813cd31aec8accf51d28d8a03f8775b610NRAL",
+  accountId = "3538507",
+  sitesUrl = "https://raw.githubusercontent.com/furbaez/test/main/test.txt", <--- REPLACE FILE
+  newrelicUrl = "https://insights-collector.newrelic.com/v1/accounts";
+
+function treatAsUTC(date) {
+  var result = new Date(date);
+  result.setMinutes(result.getMinutes() - result.getTimezoneOffset());
+  return result;
+}
+
+function daysBetween(startDate, endDate) {
+  var millisecondsPerDay = 24 * 60 * 60 * 1000;
+  return Math.round(
+    (treatAsUTC(endDate) - treatAsUTC(startDate)) / millisecondsPerDay
+  );
+}
+
+function insertInsightsEvent(
+  urlMonitored,
+  certificateIssuer,
+  daysToExpiration,
+  expirationMilliseconds
+) {
+  var options = {
+    uri: `${newrelicUrl}/${accountId}/events`,
+    body:
+      '[{"eventType":"SSLCertificateCheck","Url":"' +
+      urlMonitored +
+      '","Issuer":"' +
+      certificateIssuer +
+      '","DaysToExpiration":' +
+      daysToExpiration +
+      ', "ExpirationDate":' +
+      expirationMilliseconds +
+      "}]",
+    headers: {
+      "X-Insert-Key": licenseKey,
+      "Content-Type": "application/json",
+    },
+  };
+  console.log("Posting event for: " + urlMonitored);
+  request.post(options, function (error, response, body) {
+    console.log(response.statusMessage);
+    console.log(response.statusCode + " status code");
+    assert.ok(response.statusCode == 200, "Expected 200 OK response");
+    var info = JSON.parse(body);
+    assert.ok(
+      info.success == true,
+      "Expected True results in Response Body, result was " + info.success
+    );
+    console.log("SSL cert check completed successfully");
+  });
+}
+
+function processSite(urlToMonitor) {
+  var deferred = Q.defer();
+  console.log("Preparing to monitor " + urlToMonitor);
+
+  var options = {
+    url: urlToMonitor,
+    method: "HEAD",
+    gzip: true,
+    followRedirect: false,
+    followAllRedirects: false,
+  };
+
+  request(options, function (error, response, body) {
+    var certDetails = response.req.connection.getPeerCertificate();
+    var currentDate = new Date();
+    var certExpirationDate = new Date(certDetails.valid_to);
+    var daysToExpiration = daysBetween(currentDate, certExpirationDate);
+    var certificateIssuer = certDetails.issuer.O;
+
+    console.log("This certificate was issued by " + certificateIssuer, "");
+    console.log(
+      "This SSL certificate will expire on " + certExpirationDate,
+      ""
+    );
+    console.log("**** Date at time of testing: " + currentDate);
+    console.log("**** Days to expiration: " + daysToExpiration);
+    console.log("Creating event for: " + options.url);
+
+    insertInsightsEvent(
+      options.url,
+      certificateIssuer,
+      daysToExpiration,
+      certExpirationDate.getTime()
+    );
+    deferred.resolve();
+  });
+
+  return deferred.promise;
+}
+
+request
+  .get({ method: "GET", uri: sitesUrl }, function (error, response, body) {
+    if (error) console.error(error);
+  })
+  .on("response", function (response) {
+    response.on("data", function (data) {
+      //Convert buffer to string and convert string to an array splite by break line
+      var urls = new Buffer.from(data).toString().split("\n");
+      urls.forEach((url) => {
+        if (url) processSite(url);
+      });
+    });
+  });
